@@ -1,3 +1,1 @@
-# ProiectSo
-# ProiectSo
-# ProiectSo
+Run treasure_manager_final.c
