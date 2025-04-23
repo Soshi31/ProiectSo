@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
+#include <errno.h>
 
 #define MAX_USERNAME_LEN 32
 #define MAX_CLUE_LEN 256
@@ -22,50 +23,51 @@ typedef struct {
     int value;
 } Treasure;
 
-void log_operation(const char *hunt_path, const char *message) {
-    char log_path[512];
-    snprintf(log_path, sizeof(log_path), "%s/%s", hunt_path, LOG_FILE);
+void log_operation(const char *hunt_id, const char *message) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", hunt_id, LOG_FILE);
 
-    int log_fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (log_fd < 0) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) {
         perror("log open");
         return;
     }
-
-    dprintf(log_fd, "%s\n", message);
-    close(log_fd);
+    dprintf(fd, "%s\n", message);
+    close(fd);
 }
 
 void create_symlink(const char *hunt_id) {
-    char target[256], linkname[256];
+    char target[512], linkname[512];
     snprintf(target, sizeof(target), "%s/%s", hunt_id, LOG_FILE);
     snprintf(linkname, sizeof(linkname), "%s%s", SYMLINK_PREFIX, hunt_id);
+    /* remove old symlink if exists */
+    unlink(linkname);
     symlink(target, linkname);
 }
 
 void add_treasure(const char *hunt_id) {
     mkdir(hunt_id, 0755);
+
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", hunt_id, TREASURE_FILE);
 
     Treasure t;
-    printf("Treasure ID: "); scanf("%d", &t.id);
-    printf("Username: "); scanf("%s", t.username);
-    printf("Latitude: "); scanf("%f", &t.latitude);
-    printf("Longitude: "); scanf("%f", &t.longitude);
-    printf("Clue: "); getchar(); fgets(t.clue, MAX_CLUE_LEN, stdin);
-    t.clue[strcspn(t.clue, "\n")] = 0;
-    printf("Value: "); scanf("%d", &t.value);
+    printf("Treasure ID: ");        scanf("%d", &t.id);
+    printf("Username: ");           scanf("%31s", t.username);
+    printf("Latitude: ");           scanf("%f", &t.latitude);
+    printf("Longitude: ");          scanf("%f", &t.longitude);
+    printf("Clue: ");               getchar(); fgets(t.clue, MAX_CLUE_LEN, stdin);
+                                    t.clue[strcspn(t.clue, "\n")] = 0;
+    printf("Value: ");              scanf("%d", &t.value);
 
     int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) { perror("add open"); return; }
-
-    write(fd, &t, sizeof(Treasure));
+    write(fd, &t, sizeof(t));
     close(fd);
 
-    char log_msg[256];
-    snprintf(log_msg, sizeof(log_msg), "Added treasure ID %d", t.id);
-    log_operation(hunt_id, log_msg);
+    char msg[128];
+    snprintf(msg, sizeof(msg), "Added treasure ID %d", t.id);
+    log_operation(hunt_id, msg);
     create_symlink(hunt_id);
 }
 
@@ -74,17 +76,20 @@ void list_treasures(const char *hunt_id) {
     snprintf(path, sizeof(path), "%s/%s", hunt_id, TREASURE_FILE);
 
     struct stat st;
-    if (stat(path, &st) == -1) { perror("stat"); return; }
-
-    printf("Hunt: %s\nSize: %ld bytes\nLast modified: %s", hunt_id, st.st_size, ctime(&st.st_mtime));
+    if (stat(path, &st) < 0) {
+        perror("stat");
+        return;
+    }
+    printf("Hunt: %s\nSize: %ld bytes\nLast modified: %s",
+           hunt_id, st.st_size, ctime(&st.st_mtime));
 
     int fd = open(path, O_RDONLY);
-    if (fd < 0) { perror("list open"); return; }
+    if (fd < 0) { perror("open"); return; }
 
     Treasure t;
-    while (read(fd, &t, sizeof(Treasure)) == sizeof(Treasure)) {
-        printf("ID: %d | User: %s | (%.2f, %.2f) | Value: %d | Clue: %s\n",
-            t.id, t.username, t.latitude, t.longitude, t.value, t.clue);
+    while (read(fd, &t, sizeof(t)) == sizeof(t)) {
+        printf("ID:%d | User:%s | (%.4f,%.4f) | Value:%d | Clue:%s\n",
+               t.id, t.username, t.latitude, t.longitude, t.value, t.clue);
     }
     close(fd);
 }
@@ -92,13 +97,16 @@ void list_treasures(const char *hunt_id) {
 void view_treasure(const char *hunt_id, int target_id) {
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", hunt_id, TREASURE_FILE);
+
     int fd = open(path, O_RDONLY);
-    if (fd < 0) { perror("view open"); return; }
+    if (fd < 0) { perror("open"); return; }
 
     Treasure t;
-    while (read(fd, &t, sizeof(Treasure)) == sizeof(Treasure)) {
+    while (read(fd, &t, sizeof(t)) == sizeof(t)) {
         if (t.id == target_id) {
-            printf("Treasure found:\nID: %d\nUser: %s\nCoords: (%.2f, %.2f)\nClue: %s\nValue: %d\n",
+            printf("Treasure found:\n"
+                   "ID: %d\nUser: %s\nCoords: (%.4f, %.4f)\n"
+                   "Clue: %s\nValue: %d\n",
                    t.id, t.username, t.latitude, t.longitude, t.clue, t.value);
             close(fd);
             return;
@@ -109,73 +117,61 @@ void view_treasure(const char *hunt_id, int target_id) {
 }
 
 void remove_treasure(const char *hunt_id, int target_id) {
-    char path[512], tmp_path[512];
+    char path[512], tmp[512];
     snprintf(path, sizeof(path), "%s/%s", hunt_id, TREASURE_FILE);
-    snprintf(tmp_path, sizeof(tmp_path), "%s/tmp.dat", hunt_id);
+    snprintf(tmp,  sizeof(tmp),  "%s/tmp.dat", hunt_id);
 
     int fd = open(path, O_RDONLY);
-    int tmp_fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0 || tmp_fd < 0) { perror("remove open"); return; }
+    int fd2= open(tmp, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    if (fd<0||fd2<0){ perror("open"); return; }
 
     Treasure t;
-    int found = 0;
-    while (read(fd, &t, sizeof(Treasure)) == sizeof(Treasure)) {
-        if (t.id == target_id) {
-            found = 1;
-            continue;
-        }
-        write(tmp_fd, &t, sizeof(Treasure));
+    int found=0;
+    while (read(fd,&t,sizeof(t))==sizeof(t)) {
+        if (t.id==target_id) { found=1; continue; }
+        write(fd2,&t,sizeof(t));
     }
-    close(fd);
-    close(tmp_fd);
-
-    rename(tmp_path, path);
+    close(fd); close(fd2);
+    rename(tmp,path);
 
     if (found) {
-        char log_msg[256];
-        snprintf(log_msg, sizeof(log_msg), "Removed treasure ID %d", target_id);
-        log_operation(hunt_id, log_msg);
+        char msg[128];
+        snprintf(msg,sizeof(msg),"Removed treasure ID %d",target_id);
+        log_operation(hunt_id,msg);
     } else {
         printf("Treasure ID %d not found.\n", target_id);
     }
 }
 
 void remove_hunt(const char *hunt_id) {
-    char path[512];
+    char path[512], link[512];
     snprintf(path, sizeof(path), "%s/%s", hunt_id, TREASURE_FILE);
     unlink(path);
-
     snprintf(path, sizeof(path), "%s/%s", hunt_id, LOG_FILE);
     unlink(path);
-
+    snprintf(link, sizeof(link), "%s%s", SYMLINK_PREFIX, hunt_id);
+    unlink(link);
     rmdir(hunt_id);
-
-    char symlink_name[256];
-    snprintf(symlink_name, sizeof(symlink_name), "%s%s", SYMLINK_PREFIX, hunt_id);
-    unlink(symlink_name);
-
     printf("Hunt %s removed.\n", hunt_id);
 }
 
 int main(int argc, char *argv[]) {
     if (argc < 3) {
-        printf("Usage: %s --<add|list|view|remove_treasure|remove_hunt> <hunt_id> [<id>]\n", argv[0]);
+        fprintf(stderr,
+          "Usage: %s --<add|list|view|remove_treasure|remove_hunt> <hunt_id> [<id>]\n",
+          argv[0]);
         return 1;
     }
 
-    if (strcmp(argv[1], "--add") == 0) {
-        add_treasure(argv[2]);
-    } else if (strcmp(argv[1], "--list") == 0) {
-        list_treasures(argv[2]);
-    } else if (strcmp(argv[1], "--view") == 0 && argc == 4) {
-        view_treasure(argv[2], atoi(argv[3]));
-    } else if (strcmp(argv[1], "--remove_treasure") == 0 && argc == 4) {
-        remove_treasure(argv[2], atoi(argv[3]));
-    } else if (strcmp(argv[1], "--remove_hunt") == 0) {
-        remove_hunt(argv[2]);
-    } else {
-        printf("Invalid command.\n");
+    if      (strcmp(argv[1],"--add")==0)            add_treasure(argv[2]);
+    else if (strcmp(argv[1],"--list")==0)           list_treasures(argv[2]);
+    else if (strcmp(argv[1],"--view")==0 && argc==4)    view_treasure(argv[2],atoi(argv[3]));
+    else if (strcmp(argv[1],"--remove_treasure")==0 && argc==4)
+                                                     remove_treasure(argv[2],atoi(argv[3]));
+    else if (strcmp(argv[1],"--remove_hunt")==0)    remove_hunt(argv[2]);
+    else {
+        fprintf(stderr, "Invalid command.\n");
+        return 1;
     }
-
     return 0;
 }
